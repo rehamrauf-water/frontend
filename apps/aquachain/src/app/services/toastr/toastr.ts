@@ -24,6 +24,15 @@ export class ToastrService {
     this.showToast(title, message, 'success');
   }
 
+  /**
+   * Show a plain-text success notification. Use this when you only have a string
+   * message (not an ExecuteResult). Keeps behaviour consistent with showError.
+   */
+  showSuccessMessage(message: string, title = 'Success'): void {
+    // Message is plain text; pass through to the toast body. Keep it simple.
+    this.showToast(title, String(message), 'success');
+  }
+
   showError(message = 'Unknown error', title = 'Transaction Failed'): void {
     const cleanMessage = this.extractRelevantError(message);
     this.showToast(title, cleanMessage, 'error');
