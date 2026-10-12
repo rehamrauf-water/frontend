@@ -52,6 +52,25 @@ import { WalletBanner } from '../shared/wallet-banner/wallet-banner';
 
 const MAP_MAX_PAGES = 5;
 
+type ProjectType = 'Rainwater Harvesting' | 'Groundwater Recharge' | 'Greywater Reuse';
+
+interface Project {
+  id: number;
+  name: string;
+  type: ProjectType;
+  locationDescription?: string;
+  latitude?: string;
+  longitude?: string;
+  tankCapacityLitres?: number;
+  catchmentAreaSqm?: number;
+}
+
+interface SensorTypeOption {
+  key: string;
+  label: string;
+  unit?: string;
+}
+
 @Component({
   selector: 'citizen-science',
   imports: [
@@ -72,11 +91,15 @@ export class CitizenScience implements OnInit, OnDestroy {
   loadingSubmitData = false;
   sensorForm!: FormGroup;
   submitDataForm!: FormGroup;
+  projectForm!: FormGroup;
   walletAddress = '';
   citizenScienceContractAddress = environment.CitizenScienceContractAddress;
   walletWarning!: boolean;
 
   mode: 'register' | 'submit' | 'view' | null = 'register';
+
+  // registration step state
+  registrationStep: 1 | 2 = 1;
 
   tabs = [
     { label: 'Dashboard', icon: faGaugeHigh },
@@ -130,6 +153,13 @@ export class CitizenScience implements OnInit, OnDestroy {
   readonly canGoPrev = canGoPrev;
   readonly statusClass = statusClass;
 
+  // projects stored client-side (must be saved before registering sensors)
+  projects: Project[] = [];
+  nextProjectId = 1;
+
+  // sensor type options depend on selected project's type
+  sensorTypeOptions: SensorTypeOption[] = [];
+
   private map: LeafletMap | null = null;
   private markers: CircleMarker[] = [];
 
@@ -156,16 +186,55 @@ export class CitizenScience implements OnInit, OnDestroy {
       }
     }
 
+    // project form (step 1)
+    this.projectForm = this.fb.group({
+      name: ['', Validators.required],
+      projectType: ['', Validators.required],
+      locationDescription: [''],
+      latitude: [''],
+      longitude: [''],
+      tankCapacityLitres: [''],
+      catchmentAreaSqm: [''],
+    });
+
+    // sensor form (step 2) - sensor type will be reset/disabled until a project is chosen
     this.sensorForm = this.fb.group({
-      type: ['', Validators.required],
+      projectId: [null, Validators.required],
+      type: [{ value: '', disabled: true }, Validators.required],
+      sensorId: ['', Validators.required],
       model: ['', Validators.required],
       latitude: ['', Validators.required],
       longitude: ['', Validators.required],
-      description: ['', Validators.required],
+      locationDescription: ['', Validators.required],
     });
 
     this.submitDataForm = this.fb.group({
       value: ['', Validators.required],
+    });
+
+    // load saved projects from localStorage (per-user if wallet present)
+    this.loadProjectsFromStorage();
+
+    // watch project selection to enable/disable sensor type and reset when changed
+    this.sensorForm.get('projectId')?.valueChanges.subscribe((projectId) => {
+      if (!projectId) {
+        this.sensorForm.get('type')?.disable();
+        this.sensorTypeOptions = [];
+        this.sensorForm.get('type')?.reset('');
+        return;
+      }
+      const project = this.projects.find((p) => p.id === Number(projectId));
+      if (!project) {
+        this.sensorForm.get('type')?.disable();
+        this.sensorTypeOptions = [];
+        this.sensorForm.get('type')?.reset('');
+        return;
+      }
+      // set options based on project type and enable
+      this.sensorTypeOptions = this.getSensorTypesForProjectType(project.type);
+      this.sensorForm.get('type')?.enable();
+      // reset previously-selected type since options changed
+      this.sensorForm.get('type')?.reset('');
     });
 
     if (isPlatformBrowser(this.platformId)) {
@@ -199,6 +268,7 @@ export class CitizenScience implements OnInit, OnDestroy {
 
   setRegisterNewSensor() {
     this.mode = 'register';
+    this.registrationStep = 1;
     this.scrollToFormHeaderRef();
   }
 
@@ -283,6 +353,88 @@ export class CitizenScience implements OnInit, OnDestroy {
     return address;
   }
 
+  // --- Project save/load ---
+  private projectsStorageKey(): string {
+    // scope to user when walletAddress present, else global
+    return `citizen_projects_${this.walletAddress || 'anon'}`;
+  }
+
+  private loadProjectsFromStorage() {
+    try {
+      const raw = localStorage.getItem(this.projectsStorageKey());
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Project[];
+      if (Array.isArray(parsed)) {
+        this.projects = parsed;
+        // compute next id
+        const maxId = this.projects.reduce((m, p) => Math.max(m, p.id), 0);
+        this.nextProjectId = maxId + 1;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  private persistProjectsToStorage() {
+    try {
+      localStorage.setItem(this.projectsStorageKey(), JSON.stringify(this.projects));
+    } catch (e) {
+      console.error('Failed to persist projects', e);
+    }
+  }
+
+  saveProject() {
+    if (this.projectForm.invalid) return;
+    const v = this.projectForm.value;
+    const project: Project = {
+      id: this.nextProjectId++,
+      name: v.name,
+      type: v.projectType as ProjectType,
+      locationDescription: v.locationDescription || '',
+      latitude: v.latitude || '',
+      longitude: v.longitude || '',
+      tankCapacityLitres: v.tankCapacityLitres ? Number(v.tankCapacityLitres) : undefined,
+      catchmentAreaSqm: v.catchmentAreaSqm ? Number(v.catchmentAreaSqm) : undefined,
+    };
+    this.projects.push(project);
+    this.persistProjectsToStorage();
+    // set sensor form project and advance to step 2
+    this.sensorForm.patchValue({ projectId: project.id });
+    this.registrationStep = 2;
+    this.toastrService.showSuccess('Project saved', 'Project Registered');
+  }
+
+  // --- Sensor registration ---
+  private getSensorTypesForProjectType(t: ProjectType): SensorTypeOption[] {
+    switch (t) {
+      case 'Rainwater Harvesting':
+        return [
+          { key: 'rainfall', label: 'Rainfall', unit: 'mm' },
+          { key: 'tank_level', label: 'Tank level', unit: 'litres' },
+          { key: 'flow', label: 'Flow', unit: 'L/s' },
+        ];
+      case 'Groundwater Recharge':
+        return [
+          { key: 'water_level', label: 'Groundwater level', unit: 'm' },
+          { key: 'conductivity', label: 'Conductivity', unit: 'µS/cm' },
+          { key: 'temperature', label: 'Temperature', unit: '°C' },
+        ];
+      case 'Greywater Reuse':
+        return [
+          { key: 'turbidity', label: 'Turbidity', unit: 'NTU' },
+          { key: 'ph', label: 'pH', unit: '' },
+          { key: 'flow', label: 'Flow', unit: 'L/s' },
+        ];
+      default:
+        return [];
+    }
+  }
+
+  getSelectedSensorUnit(): string | undefined {
+    const sel = this.sensorForm.get('type')?.value;
+    return this.sensorTypeOptions.find((o) => o.key === sel)?.unit;
+  }
+
   async onRegisterSensor() {
     if (this.sensorForm.invalid) return;
 
@@ -295,13 +447,15 @@ export class CitizenScience implements OnInit, OnDestroy {
     }
 
     const value = this.sensorForm.value;
+    const project = this.projects.find((p) => p.id === Number(value.projectId));
+
     const sensorJson: SensorSubmission = {
       type: value.type,
       model: value.model,
       location: {
         lat: String(value.latitude),
         lng: String(value.longitude),
-        description: value.description,
+        description: `${value.locationDescription || ''}${project ? ' (Project: ' + project.name + ')' : ''}`,
       },
     };
 
@@ -318,6 +472,10 @@ export class CitizenScience implements OnInit, OnDestroy {
       if (result) {
         await this.loadSensors();
         this.toastrService.showSuccess(result, 'Transaction Confirmed');
+        // after successful registration, clear sensor form and reset to step1
+        this.sensorForm.reset();
+        this.sensorForm.get('type')?.disable();
+        this.registrationStep = 1;
       }
     } catch (err: unknown) {
       console.error('Error submitting sensor:', err);
@@ -554,9 +712,7 @@ export class CitizenScience implements OnInit, OnDestroy {
         this.dashboardProposed = proposed;
         this.dashboardRecentSensors = recentSensors;
         this.dashboardRecentEntries = recentEntries;
-        this.dashboardUnverified = recentEntries.filter(
-          (e) => !e.verified,
-        ).length;
+        this.dashboardUnverified = recentEntries.filter((e) => !e.verified).length;
         this.loadingDashboard = false;
         this.cdr.detectChanges();
       });
@@ -722,9 +878,7 @@ export class CitizenScience implements OnInit, OnDestroy {
 
     if (withCoords.length > 1) {
       const bounds = L.latLngBounds(
-        withCoords.map(
-          (row) => [row.coords.lat, row.coords.lng] as [number, number],
-        ),
+        withCoords.map((row) => [row.coords.lat, row.coords.lng] as [number, number]),
       );
       this.map.fitBounds(bounds, { padding: [24, 24] });
     }
